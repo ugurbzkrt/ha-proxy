@@ -1,0 +1,85 @@
+#keepalive install
+
+apt update && apt install -y keepalived haproxy
+
+#keepalive script
+
+cat >> /etc/keepalived/check_apiserver.sh <<EOF
+#!/bin/sh
+
+errorExit() {
+  echo "*** $@" 1>&2
+  exit 1
+}
+
+curl --silent --max-time 2 --insecure https://localhost:6443/ -o /dev/null || errorExit "Error GET https://localhost:6443/"
+if ip addr | grep -q <VIP>; then
+  curl --silent --max-time 2 --insecure https://<VIP>:6443/ -o /dev/null || errorExit "Error GET https://<VIP>:6443/"
+fi
+EOF
+
+chmod +x /etc/keepalived/check_apiserver.sh
+
+#keepalive config
+
+cat >> /etc/keepalived/keepalived.conf <<EOF
+vrrp_script check_apiserver {
+  script "/etc/keepalived/check_apiserver.sh"
+  interval 3
+  timeout 10
+  fall 5
+  rise 2
+  weight -2
+}
+
+vrrp_instance VI_1 {
+    state BACKUP
+    interface <interface>
+    virtual_router_id 1
+    priority 100
+    advert_int 5
+    authentication {
+        auth_type PASS
+        auth_pass devopsdude
+    }
+    virtual_ipaddress {
+        <VIP>
+    }
+    track_script {
+        check_apiserver
+    }
+}
+EOF
+
+#keepalive start
+
+systemctl enable --now keepalived
+
+
+#haproxy install and config
+
+apt-get install haproxy -y
+
+
+cat >> /etc/haproxy/haproxy.cfg <<EOF
+
+frontend kubernetes-frontend
+  bind *:6443
+  mode tcp
+  option tcplog
+  default_backend kubernetes-backend
+
+backend kubernetes-backend
+  option httpchk GET /healthz
+  http-check expect status 200
+  mode tcp
+  option ssl-hello-chk
+  balance roundrobin
+    server master1 <master1-IP>:6443 check fall 3 rise 2
+    server master2 <master2-IP>:6443 check fall 3 rise 2
+    server master3 <master3-IP>:6443 check fall 3 rise 2
+
+EOF
+
+
+systemctl enable haproxy && systemctl restart haproxy
